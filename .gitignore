@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# CognitiveRec: downloaded datasets and experiment outputs (anchored so that
+# src/cognitiverec/data/ stays tracked)
+/data/
+/results/
+
+.python-version

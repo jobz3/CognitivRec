@@ -1,0 +1,5 @@
+# Stage 3, all owners. Final evaluation on the test split using the tuned hyperparameters.
+comparison_reference: "B1: ItemKNN"
+comparison_pairs:
+  - ["D: Cognitive + UCB", "C: Cognitive"]
+cold_start: true

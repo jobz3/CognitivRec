@@ -1,0 +1,11 @@
+# Stage 1, owner: Jobin. Hyperparameter grids, searched on the validation split.
+# The selected values are written to configs/tuned/baselines.yaml.
+baselines:
+  Popularity: {}
+  ItemKNN:
+    top_k: [20, 50, 80, 150, 300]
+    shrinkage: [0.0, 5.0, 15.0, 50.0, 100.0]
+    binary: [false, true]
+    tfidf: [false, true]
+  SVD:
+    n_factors: [2, 4, 8, 16, 32, 64, 128]

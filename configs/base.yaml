@@ -1,0 +1,24 @@
+# Settings shared by every stage. Stage files override these.
+seeds: [42, 43, 44, 45, 46]
+
+paths:
+  data: data
+  results: results
+  tuned: configs/tuned
+
+split:
+  train: 0.70
+  val: 0.15 # the remaining 0.15 is test
+
+evaluation:
+  k: 10
+  positive_threshold: 4.0 # ratings at or above this count as relevant
+
+reliability:
+  noise_levels: [2, 5] # random 5-star interactions injected per user
+  shift_steps: [1, 2, 3, 5, 10] # injected interactions at which adaptation is measured
+  shift_report_step: 5 # the step shown in result tables
+  shift_min_item_popularity: 5 # inject only items the embeddings know something about
+  stability_steps: 5
+  cold_start_sizes: [5, 10, 20]
+  cold_start_fraction: 0.2

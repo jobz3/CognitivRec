@@ -1,0 +1,41 @@
+# Stage 4, owners: Mudit and Abhinav. Each row changes tuned Model D by the given overrides.
+seeds: [42, 43, 44]
+cold_start: false
+
+# Each row is compared with the reference, so an interval excluding zero attributes the difference
+# to the mechanism that row removes. The extra pair isolates short-term memory with exploration off.
+comparison_reference: "Full Model D"
+comparison_pairs:
+  - ["Model C, raw embeddings", "long-term only, raw embeddings"]
+  - ["Model C, L2 embeddings", "long-term only, L2 embeddings"]
+
+ablations:
+  - name: "Full Model D"
+    overrides: {}
+  - name: "w/o exploration (Model C)"
+    overrides: {exploration_beta: 0.0}
+  - name: "w/o RPE adaptation"
+    overrides: {use_rpe: false}
+  - name: "w/o short-term memory"
+    overrides: {use_short_term: false, use_rpe: false}
+  # Control for RQ3: does attention identify evidence better than treating memories equally?
+  - name: "uniform attention"
+    overrides: {attention_mode: uniform}
+  # Controls for RQ2: long-term memory alone, under both embedding choices. The plan's grid kept
+  # exploration on in its "no memory" row, so it could not test the long-term memory hypothesis.
+  - name: "long-term only, L2 embeddings"
+    overrides:
+      {use_short_term: false, use_rpe: false, exploration_beta: 0.0, normalize_embeddings: true}
+  - name: "long-term only, raw embeddings"
+    overrides:
+      {use_short_term: false, use_rpe: false, exploration_beta: 0.0, normalize_embeddings: false}
+  - name: "Model C, L2 embeddings"
+    overrides: {exploration_beta: 0.0, normalize_embeddings: true}
+  - name: "Model C, raw embeddings"
+    overrides: {exploration_beta: 0.0, normalize_embeddings: false}
+
+# Trade-off curves are drawn on validation, like the tuning they illustrate, so that no test
+# result can influence a hyperparameter choice.
+sweeps:
+  beta: [0.0, 0.005, 0.01, 0.02, 0.05, 0.1, 0.18, 0.3, 0.5, 1.0, 2.0]
+  base_alpha: [0.1, 0.25, 0.4, 0.55, 0.7, 0.85]
