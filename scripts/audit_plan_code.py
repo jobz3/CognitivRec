@@ -8,10 +8,6 @@ deleted once the team has reviewed the changes.
 
 from __future__ import annotations
 
-import io
-import urllib.request
-import zipfile
-
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
@@ -22,7 +18,6 @@ from cognitiverec.data import load_movielens_100k
 
 SEED = 42
 TOP_K = 10
-ML_1M_URL = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
 
 
 def heading(text: str) -> None:
@@ -379,18 +374,6 @@ def timestamps() -> None:
     one_sitting_share = 100 * (sessions.loc[flagged] == 1).mean()
     print(f"Users the plan labels a 'genuine' shift: {len(flagged)} ({share:.1f}%)")
     print(f"Of those, users who rated everything in one sitting: {one_sitting_share:.1f}%")
-
-    payload = urllib.request.urlopen(ML_1M_URL, timeout=120).read()
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        ratings = pd.read_csv(
-            io.BytesIO(archive.read("ml-1m/ratings.dat")),
-            sep="::",
-            engine="python",
-            names=["u", "i", "r", "t"],
-        ).sort_values(["u", "t"])
-    groups = ratings.groupby("u")["t"]
-    one_sitting = ((groups.diff() > 1800).groupby(ratings["u"]).sum() + 1 == 1).mean()
-    print(f"Same measure on MovieLens 1M, users in one sitting: {100 * one_sitting:.1f}%")
 
 
 def global_ordering() -> None:

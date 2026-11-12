@@ -224,4 +224,4 @@ __marimo__/
 /data/
 /results/
 
-.python-version
+*.md
