@@ -9,7 +9,7 @@ Model D is this model with `exploration_beta > 0`; its exploration layer is in `
 4. Decision: rank by r_hat, plus the UCB bonus for Model D.
 5. Feedback: surprise |r - r_hat| moves alpha_u; then memory and u_LT are updated.
 
-docs/changes-from-plan.md lists every place this differs from the plan's Colab code, and why.
+PROJECT_REPORT.md describes the experimental rationale.
 """
 
 from __future__ import annotations
@@ -19,23 +19,8 @@ import pandas as pd
 
 from cognitiverec.models.base import Recommender
 from cognitiverec.models.exploration import ExposureTracker, ucb_bonus
+from cognitiverec.models.latent import rating_to_reward, unit_rows, unit_vector
 from cognitiverec.models.svd import SVD
-
-
-def rating_to_reward(rating: np.ndarray | float) -> np.ndarray | float:
-    """Map a 1-5 star rating onto a reward in [-1, 1]; 2.5 stars is neutral."""
-    return np.clip((rating - 2.5) / 2.5, -1.0, 1.0)
-
-
-def _unit_rows(vectors: np.ndarray) -> np.ndarray:
-    """Scale each row to unit length. Rows that are effectively zero become exactly zero."""
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    return np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 1e-10)
-
-
-def _unit_vector(vector: np.ndarray) -> np.ndarray:
-    norm = np.linalg.norm(vector)
-    return vector / norm if norm > 1e-10 else np.zeros_like(vector)
 
 
 class CognitiveRecommender(Recommender):
@@ -91,14 +76,14 @@ class CognitiveRecommender(Recommender):
 
     def fit(self, history: pd.DataFrame, n_users: int, n_items: int) -> CognitiveRecommender:
         raw = SVD(n_factors=self.n_factors, seed=self.seed).fit(history, n_users, n_items).item_vecs
-        self._unit = _unit_rows(raw)
+        self._unit = unit_rows(raw)
         self._set_embeddings(self._unit if self.normalize_embeddings else raw, n_users)
 
         for user, group in history.groupby("user", sort=False):
             items = group["item"].to_numpy()
             ratings = group["rating"].to_numpy(dtype=np.float64)
             weighted = rating_to_reward(ratings)[:, None] * self._unit[items]
-            self.u_lt[user] = _unit_vector(weighted.mean(axis=0))
+            self.u_lt[user] = unit_vector(weighted.mean(axis=0))
             positives = items[ratings >= self.positive_threshold]
             self.memory[user] = [int(item) for item in positives[-self.memory_size :]]
 
@@ -188,10 +173,26 @@ class CognitiveRecommender(Recommender):
         consolidated = (1.0 - self.lt_rate) * self.u_lt[user] + self.lt_rate * reward * self._unit[
             item
         ]
-        self.u_lt[user] = _unit_vector(consolidated)
+        self.u_lt[user] = unit_vector(consolidated)
 
     def record_impression(self, items: np.ndarray) -> None:
         self.exposure.record(items)
+
+    def evidence_items(self, user: int) -> np.ndarray:
+        return np.asarray(self.memory[user], dtype=np.int64)
+
+    def score_components(self, user: int, item: int) -> dict[str, float]:
+        """Decompose the displayed score into its actual additive components."""
+        long_term = float(self._candidates[item] @ self.u_lt[user])
+        reward = float(self._expected_reward(user, self.memory[user], np.array([item]))[0])
+        if self.use_short_term and self.memory[user]:
+            long_term *= 1.0 - self.alpha[user]
+        bonus = self._bonus()
+        return {
+            "long_term": long_term,
+            "short_term": reward - long_term,
+            "exploration": float(bonus[item]) if isinstance(bonus, np.ndarray) else float(bonus),
+        }
 
     def attributions(self, user: int, item: int) -> np.ndarray:
         """Return attention over memory for `item`; empty when short-term memory is off."""

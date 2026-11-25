@@ -70,16 +70,16 @@ class ItemKNN(Recommender):
         """Fold the interaction into the user's profile. Similarities stay as fitted."""
         self.profiles[user, item] = 1.0 if self.binary else rating
 
-    def _entries(self, user: int) -> np.ndarray:
+    def evidence_items(self, user: int) -> np.ndarray:
         return np.flatnonzero(self.profiles[user])
 
     def attributions(self, user: int, item: int) -> np.ndarray:
         """Return each history item's contribution to the score of `item`."""
-        entries = self._entries(user)
+        entries = self.evidence_items(user)
         weights = self.neighbours_of[item].toarray().ravel()
         return self.profiles[user, entries] * weights[entries]
 
     def score_without(self, user: int, entry: int) -> np.ndarray:
         profile = self.profiles[user].copy()
-        profile[self._entries(user)[entry]] = 0.0
+        profile[self.evidence_items(user)[entry]] = 0.0
         return self.neighbours_of @ profile

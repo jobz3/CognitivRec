@@ -2,7 +2,7 @@ ItemKNN:
   binary: false
   shrinkage: 0.0
   tfidf: true
-  top_k: 50
+  top_k: 300
 Popularity: {}
 SVD:
   n_factors: 8

@@ -19,6 +19,8 @@ from cognitiverec.experiments.common import (
     paired_comparisons,
     print_report,
     ranking_summary,
+    record_cohorts,
+    record_models,
     start_run,
 )
 from cognitiverec.models import CognitiveRecommender, build_model
@@ -34,7 +36,7 @@ def run_sweeps(config: dict[str, Any], dataset: Dataset, split: Split) -> dict[s
     tuned = load_tuned(config, "cognitive")["model_d"]
 
     beta_rows = []
-    for beta in config["sweeps"]["beta"]:
+    for beta in sorted({*config["sweeps"]["beta"], tuned["exploration_beta"]}):
         model = phase.fit(CognitiveRecommender(**{**tuned, "exploration_beta": beta}))
         runs = [ranking_summary(model, phase, k, seed) for seed in seeds]
         beta_rows.append(
@@ -43,6 +45,7 @@ def run_sweeps(config: dict[str, Any], dataset: Dataset, split: Split) -> dict[s
                 "ndcg": float(np.mean([run["ndcg"] for run in runs])),
                 "coverage_pct": float(np.mean([run["coverage_pct"] for run in runs])),
                 "gini": float(np.mean([run["gini"] for run in runs])),
+                "rank_merit_gap": float(np.mean([run["rank_merit_gap"] for run in runs])),
             }
         )
 
@@ -57,7 +60,8 @@ def run_sweeps(config: dict[str, Any], dataset: Dataset, split: Split) -> dict[s
 
     alpha_rows = []
     report_step = settings["shift_report_step"]
-    for alpha in config["sweeps"]["base_alpha"]:
+    base_alpha = tuned.get("base_alpha", CognitiveRecommender().base_alpha)
+    for alpha in sorted({*config["sweeps"]["base_alpha"], base_alpha}):
         model = phase.fit(CognitiveRecommender(**{**tuned, "base_alpha": alpha}))
         stability, adaptation, retention = [], [], []
         for seed in seeds:
@@ -70,8 +74,8 @@ def run_sweeps(config: dict[str, Any], dataset: Dataset, split: Split) -> dict[s
                 settings["shift_min_item_popularity"],
             )
             at_step = curve[curve["step"] == report_step]
-            adaptation.append(float(at_step["adaptation"].iloc[0]))
-            retention.append(float(at_step["retention_pct"].iloc[0]))
+            adaptation.append(float(at_step["adaptation"].mean()))
+            retention.append(float(at_step["retention_pct"].mean()))
             stability.append(
                 evaluate_stability(
                     model, phase, k, settings["stability_steps"], np.random.default_rng(seed)
@@ -99,11 +103,18 @@ def run(config: dict[str, Any] | None = None, dataset: Dataset | None = None) ->
     run_dir = start_run(config, "stage4")
     phase = test_phase(context.dataset, context.split, context.positive_threshold)
     tuned = load_tuned(config, "cognitive")["model_d"]
+    models = [
+        ModelSpec(ablation["name"], "Cognitive", {**tuned, **ablation["overrides"]})
+        for ablation in config["ablations"]
+    ]
+    record_cohorts(
+        run_dir, phase, validation_phase(context.dataset, context.split, context.positive_threshold)
+    )
+    record_models(run_dir, models)
 
     rows, per_user = [], []
-    for ablation in config["ablations"]:
-        print(f"Evaluating {ablation['name']}...", flush=True)
-        spec = ModelSpec(ablation["name"], "Cognitive", {**tuned, **ablation["overrides"]})
+    for spec in models:
+        print(f"Evaluating {spec.name}...", flush=True)
         result = evaluate_trust(spec, phase, config)
         rows.append({"model": spec.name, **result.summary})
         per_user.append(result.per_user)

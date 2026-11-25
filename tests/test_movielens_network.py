@@ -22,7 +22,8 @@ pytestmark = pytest.mark.network
 def data():
     config = load_config()
     dataset = load_movielens_100k(resolve_path(config, "data"))
-    return dataset, chronological_split(dataset.interactions, **config["split"])
+    split = chronological_split(dataset.interactions, 0.70, 0.15, mode="per_user")
+    return dataset, split
 
 
 def test_dataset_and_split_sizes(data):
@@ -37,6 +38,24 @@ def test_temporal_report_matches_the_documented_limits(data):
     assert report["single_session_users_pct"] == pytest.approx(59.6, abs=0.1)
     assert report["same_second_ratings_pct"] == pytest.approx(75.8, abs=0.1)
     assert report["train_later_than_test_row_pct"] == pytest.approx(39.9, abs=0.1)
+
+
+def test_global_split_uses_only_prior_interactions_and_a_warm_catalogue(data):
+    dataset, _ = data
+    split = chronological_split(dataset.interactions, mode="global")
+    assert len(split.train) + len(split.val) + len(split.test) == 100_000
+    assert split.train["timestamp"].max() < split.val["timestamp"].min()
+    assert split.val["timestamp"].max() < split.test["timestamp"].min()
+    phase = test_phase(dataset, split)
+    assert temporal_report(split)["train_later_than_test_row_pct"] == 0
+    assert 0 < phase.cohort["cold_user_rows"] < len(split.test)
+    assert 0 < phase.cohort["unavailable_item_rows"] < len(split.test)
+    assert set(phase.targets["user"]) <= set(phase.history["user"])
+    assert set(phase.targets["item"]) <= set(phase.history["item"])
+    result = evaluate_ranking(phase.fit(Popularity()), phase)
+    for user, items in result.recommendations.items():
+        assert phase.catalogue[items].all()
+        assert not np.intersect1d(items, phase.seen_items(user)).size
 
 
 @pytest.mark.parametrize(

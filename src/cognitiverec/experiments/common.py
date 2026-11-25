@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
+import platform
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +19,10 @@ import yaml
 
 from cognitiverec.config import PROJECT_ROOT, load_tuned, resolve_path
 from cognitiverec.data import Dataset, Split, chronological_split, load_movielens_100k
+from cognitiverec.data.movielens import FILES
 from cognitiverec.evaluation.explainability import evaluate_fidelity
 from cognitiverec.evaluation.fairness import fairness_report
-from cognitiverec.evaluation.protocol import Phase, evaluate_ranking
+from cognitiverec.evaluation.protocol import Phase, RankingRun, evaluate_ranking
 from cognitiverec.evaluation.reliability import (
     evaluate_cold_start,
     evaluate_noise,
@@ -38,6 +42,7 @@ REPORT_GROUPS = {
         "coverage_pct",
         "gini",
         "merit_gap",
+        "rank_merit_gap",
         "recall_head",
         "recall_mid",
         "recall_tail",
@@ -54,10 +59,14 @@ REPORT_GROUPS = {
     ),
     "RQ4 reliability": (
         "replay_ndcg",
+        "frozen_replay_ndcg",
+        "replay_gain",
+        "replay_users",
         "drift_ndcg",
         "no_drift_ndcg",
         "shift_adaptation",
         "shift_adaptation_gain",
+        "shift_feedback_gain",
         "shift_retention_pct",
         "noise_retention_2_pct",
         "noise_retention_5_pct",
@@ -132,11 +141,59 @@ def _git_revision() -> str:
 
 def start_run(config: dict[str, Any], stage: str) -> Path:
     """Create this run's output folder and record the exact configuration and code version."""
-    run_dir = resolve_path(config, "results") / stage / datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
+    run_dir = resolve_path(config, "results") / stage / stamp
+    run_dir.mkdir(parents=True)
     with (run_dir / "config.yaml").open("w", encoding="utf-8") as handle:
         yaml.safe_dump({"git": _git_revision(), "config": config}, handle, sort_keys=True)
     return run_dir
+
+
+def record_cohorts(run_dir: Path, *phases: Phase) -> None:
+    """Persist who and what each result can represent."""
+    with (run_dir / "cohorts.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump({phase.name: phase.cohort for phase in phases}, handle, sort_keys=True)
+
+
+def record_models(run_dir: Path, models: list[ModelSpec]) -> None:
+    with (run_dir / "models.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(
+            {spec.name: {"kind": spec.kind, "params": spec.params} for spec in models}, handle
+        )
+
+
+def run_manifest(run_dir: Path, data_dir: Path | None, execution_mode: str) -> dict:
+    """Fingerprint data and package sources, including uncommitted source edits."""
+    source = hashlib.sha256()
+    for path in sorted((PROJECT_ROOT / "src/cognitiverec").rglob("*.py")):
+        source.update(path.relative_to(PROJECT_ROOT).as_posix().encode())
+        source.update(b"\0")
+        source.update(path.read_bytes())
+        source.update(b"\0")
+    return {
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_dir.name,
+        "execution_mode": execution_mode,
+        "code_sha256": source.hexdigest(),
+        "lock_sha256": hashlib.sha256((PROJECT_ROOT / "uv.lock").read_bytes()).hexdigest(),
+        "dataset_sha256": {
+            name: hashlib.sha256((data_dir / "ml-100k" / name).read_bytes()).hexdigest()
+            for name in FILES
+        }
+        if data_dir is not None
+        else {},
+        "versions": {
+            "python": platform.python_version(),
+            **{package: version(package) for package in ("numpy", "pandas", "scipy", "matplotlib")},
+        },
+    }
+
+
+def finish_run(run_dir: Path, manifest: dict) -> None:
+    with (run_dir / "manifest.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(
+            {**manifest, "completed_utc": datetime.now(timezone.utc).isoformat()}, handle
+        )
 
 
 def expand_grid(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
@@ -161,7 +218,11 @@ def standard_models(config: dict[str, Any]) -> list[ModelSpec]:
 def ranking_summary(model: Recommender, phase: Phase, k: int, seed: int | None = None) -> dict:
     """Return the RQ1 and RQ2 metrics of one recommendation pass."""
     rng = None if seed is None else np.random.default_rng(seed)
-    run = evaluate_ranking(model, phase, k, rng)
+    return summarize_ranking(evaluate_ranking(model, phase, k, rng), phase)
+
+
+def summarize_ranking(run: RankingRun, phase: Phase) -> dict:
+    """Summarize a ranking once so experiments can also retain individual user scores."""
     summary = {metric: float(run.per_user[metric].mean()) for metric in QUALITY_METRICS}
     summary.update(fairness_report(run, phase))
     return summary
@@ -175,26 +236,43 @@ class TrustResult:
     spread: dict[str, float]
     per_user: pd.DataFrame
     shift_curve: pd.DataFrame
+    fidelity_examples: list[dict]
 
 
-def _seed_results(
+def ranking_and_replay(
+    model: Recommender, phase: Phase, k: int, seed: int
+) -> tuple[dict[str, float], pd.DataFrame]:
+    """Measure the same one-shot ranking and replay outcomes under either split."""
+    run = evaluate_ranking(model, phase, k, np.random.default_rng(seed))
+    metrics = summarize_ranking(run, phase)
+
+    replay = evaluate_replay(model, phase, k, np.random.default_rng(seed))
+    metrics["replay_ndcg"] = float(replay["ndcg"].mean())
+    metrics["frozen_replay_ndcg"] = float(replay["frozen_ndcg"].mean())
+    metrics["replay_gain"] = metrics["replay_ndcg"] - metrics["frozen_replay_ndcg"]
+    metrics["replay_users"] = len(replay)
+    metrics["drift_ndcg"] = float(replay.loc[replay["observed_drift"], "ndcg"].mean())
+    metrics["no_drift_ndcg"] = float(replay.loc[~replay["observed_drift"], "ndcg"].mean())
+
+    replay = replay.assign(replay_gain=replay["ndcg"] - replay["frozen_ndcg"])
+    per_user = run.per_user.merge(
+        replay[["user", "ndcg", "replay_gain"]].rename(columns={"ndcg": "replay_ndcg"}),
+        on="user",
+        how="left",
+    )
+    return metrics, per_user.assign(seed=seed)
+
+
+def reliability_stress(
     model: Recommender, phase: Phase, config: dict[str, Any], seed: int
-) -> tuple[dict[str, float], pd.DataFrame, pd.DataFrame]:
-    """Run every seeded test. Each gets its own generator, so tests cannot affect one another."""
+) -> tuple[dict[str, float], pd.DataFrame]:
+    """Run matched shift, noise and stability tests on the fitted model."""
     k = config["evaluation"]["k"]
     settings = config["reliability"]
+    metrics = {}
 
     def rng() -> np.random.Generator:
         return np.random.default_rng(seed)
-
-    run = evaluate_ranking(model, phase, k, rng())
-    metrics = {metric: float(run.per_user[metric].mean()) for metric in QUALITY_METRICS}
-    metrics.update(fairness_report(run, phase))
-
-    replay = evaluate_replay(model, phase, k, rng())
-    metrics["replay_ndcg"] = float(replay["ndcg"].mean())
-    metrics["drift_ndcg"] = float(replay.loc[replay["observed_drift"], "ndcg"].mean())
-    metrics["no_drift_ndcg"] = float(replay.loc[~replay["observed_drift"], "ndcg"].mean())
 
     curve = evaluate_simulated_shift(
         model,
@@ -205,21 +283,18 @@ def _seed_results(
         settings["shift_min_item_popularity"],
     )
     at_step = curve[curve["step"] == settings["shift_report_step"]]
-    metrics["shift_adaptation"] = float(at_step["adaptation"].iloc[0])
+    metrics["shift_adaptation"] = float(at_step["adaptation"].mean())
     # The gain matters: popular items can already fall in the new genre with no adaptation at all.
     metrics["shift_adaptation_gain"] = metrics["shift_adaptation"] - float(
-        curve["adaptation"].iloc[0]
+        curve.loc[curve["step"] == 0, "adaptation"].mean()
     )
-    metrics["shift_retention_pct"] = float(at_step["retention_pct"].iloc[0])
+    metrics["shift_retention_pct"] = float(at_step["retention_pct"].mean())
+    metrics["shift_feedback_gain"] = float(at_step["feedback_gain"].mean())
 
     for level in settings["noise_levels"]:
         metrics[f"noise_retention_{level}_pct"] = evaluate_noise(model, phase, level, k, rng())
     metrics["stability"] = evaluate_stability(model, phase, k, settings["stability_steps"], rng())
-    # Replay is the only test here in which RPE can act, so its per-user values are kept as well.
-    per_user = run.per_user.merge(
-        replay[["user", "ndcg"]].rename(columns={"ndcg": "replay_ndcg"}), on="user", how="left"
-    )
-    return metrics, per_user.assign(seed=seed), curve.assign(seed=seed)
+    return metrics, curve.assign(seed=seed)
 
 
 def evaluate_trust(spec: ModelSpec, phase: Phase, config: dict[str, Any]) -> TrustResult:
@@ -228,7 +303,9 @@ def evaluate_trust(spec: ModelSpec, phase: Phase, config: dict[str, Any]) -> Tru
     settings = config["reliability"]
     rows, per_user, curves = [], [], []
     for seed in config["seeds"]:
-        metrics, users, curve = _seed_results(model, phase, config, seed)
+        metrics, users = ranking_and_replay(model, phase, config["evaluation"]["k"], seed)
+        stress, curve = reliability_stress(model, phase, config, seed)
+        metrics.update(stress)
         if config.get("cold_start", False):
             metrics.update(
                 evaluate_cold_start(
@@ -245,8 +322,11 @@ def evaluate_trust(spec: ModelSpec, phase: Phase, config: dict[str, Any]) -> Tru
         curves.append(curve)
 
     table = pd.DataFrame(rows)
-    # Fidelity has no random part, so it runs once rather than once per seed.
-    fidelity = evaluate_fidelity(model, phase)
+    # Deletion is exhaustive. Use the first ranking seed to fix Model D's decision state.
+    examples: list[dict] = []
+    fidelity = evaluate_fidelity(
+        model, phase, config["evaluation"]["k"], np.random.default_rng(config["seeds"][0]), examples
+    )
     return TrustResult(
         summary={**table.mean().to_dict(), **fidelity},
         spread=table.std(ddof=0).to_dict(),
@@ -254,6 +334,7 @@ def evaluate_trust(spec: ModelSpec, phase: Phase, config: dict[str, Any]) -> Tru
         shift_curve=(
             pd.concat(curves).groupby("step").mean().drop(columns="seed").reset_index()
         ).assign(model=spec.name),
+        fidelity_examples=examples,
     )
 
 
@@ -261,7 +342,7 @@ def paired_comparisons(
     per_user: pd.DataFrame,
     reference: str,
     extra_pairs: Iterable[Iterable[str]] = (),
-    metrics: Iterable[str] = ("ndcg", "replay_ndcg"),
+    metrics: Iterable[str] = ("ndcg", "replay_ndcg", "replay_gain"),
 ) -> pd.DataFrame:
     """Compare models user by user, with bootstrap intervals over users.
 
@@ -273,6 +354,8 @@ def paired_comparisons(
     models = list(per_user["model"].unique())
     rows = []
     for metric in metrics:
+        if metric not in per_user:
+            continue
         table = per_user.groupby(["user", "model"])[metric].mean().unstack("model")
         pairs = [(model, reference) for model in models if model != reference]
         pairs.extend(tuple(pair) for pair in extra_pairs)
@@ -288,6 +371,7 @@ def paired_comparisons(
                     "difference": mean,
                     "ci_low": low,
                     "ci_high": high,
+                    "paired_users": int((table[model].notna() & table[baseline].notna()).sum()),
                 }
             )
     return pd.DataFrame(rows)

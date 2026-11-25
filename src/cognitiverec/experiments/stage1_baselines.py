@@ -16,6 +16,7 @@ from cognitiverec.experiments.common import (
     load_context,
     print_report,
     ranking_summary,
+    record_cohorts,
     start_run,
 )
 from cognitiverec.models import build_model
@@ -27,6 +28,8 @@ def tune_baselines(
     """Pick each baseline's best hyperparameters by validation NDCG. Never touches `split.test`."""
     evaluation = config["evaluation"]
     phase = validation_phase(dataset, split, evaluation["positive_threshold"])
+    if not len(phase.users):
+        raise ValueError("No users have eligible positive validation targets.")
     rows = []
     best: dict[str, dict[str, Any]] = {}
     for kind, grid in config["baselines"].items():
@@ -63,6 +66,7 @@ def run(config: dict[str, Any] | None = None, dataset: Dataset | None = None) ->
     threshold, k = context.positive_threshold, context.k
     val = validation_phase(context.dataset, context.split, threshold)
     final = test_phase(context.dataset, context.split, threshold)
+    record_cohorts(run_dir, val, final)
     rows = {"val": [], "test": []}
     for kind, params in best.items():
         rows["val"].append(

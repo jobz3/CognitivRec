@@ -31,27 +31,47 @@ class Phase:
         targets: pd.DataFrame,
         dataset: Dataset,
         positive_threshold: float = 4.0,
+        warm_only: bool = False,
     ) -> None:
         self.name = name
         self.history = history
-        self.targets = targets
         self.n_users = dataset.n_users
         self.n_items = dataset.n_items
         self.item_genres = dataset.item_genres
+        self.item_titles = dataset.item_titles
         self.genre_names = dataset.genre_names
         self.positive_threshold = positive_threshold
         self.popularity = np.bincount(history["item"].to_numpy(), minlength=dataset.n_items)
+        self.catalogue = self.popularity > 0 if warm_only else np.ones(dataset.n_items, dtype=bool)
+        self.unavailable = np.flatnonzero(~self.catalogue)
         self.self_information = self_information(self.popularity, dataset.n_users)
         self.seen = {int(user): group["item"].to_numpy() for user, group in history.groupby("user")}
-        self.streams = {int(user): group for user, group in targets.groupby("user")}
-        positive = targets[targets["rating"] >= positive_threshold]
+        known_user = targets["user"].isin(self.seen)
+        known_item = self.catalogue[targets["item"].to_numpy()]
+        eligible = known_user & known_item if warm_only else np.ones(len(targets), dtype=bool)
+        self.targets = targets.loc[eligible].copy()
+        self.streams = {int(user): group for user, group in self.targets.groupby("user")}
+        positive = self.targets[self.targets["rating"] >= positive_threshold]
         self.positives = {
             int(user): set(group["item"].tolist()) for user, group in positive.groupby("user")
         }
         self.users = np.array(sorted(self.positives), dtype=np.int64)
+        self.cohort = {
+            "target_rows": len(targets),
+            "target_users": targets["user"].nunique(),
+            "cold_user_rows": int((~known_user).sum()),
+            "unavailable_item_rows": int((~known_item).sum()),
+            "eligible_rows": len(self.targets),
+            "ranking_users": len(self.users),
+            "positive_targets": sum(map(len, self.positives.values())),
+            "eligible_catalogue_items": int(self.catalogue.sum()),
+        }
 
     def seen_items(self, user: int) -> np.ndarray:
         return self.seen.get(user, np.empty(0, dtype=np.int64))
+
+    def excluded_items(self, user: int) -> np.ndarray:
+        return np.concatenate([self.seen_items(user), self.unavailable])
 
     def fit(self, model: Recommender) -> Recommender:
         """Fit `model` on this phase's history."""
@@ -60,13 +80,22 @@ class Phase:
 
 def validation_phase(dataset: Dataset, split: Split, positive_threshold: float = 4.0) -> Phase:
     """For tuning: learn from train, predict validation."""
-    return Phase("val", split.train, split.val, dataset, positive_threshold)
+    return Phase(
+        "val", split.train, split.val, dataset, positive_threshold, warm_only=split.mode == "global"
+    )
 
 
 def test_phase(dataset: Dataset, split: Split, positive_threshold: float = 4.0) -> Phase:
     """For final results: learn from train and validation, predict test."""
     history = pd.concat([split.train, split.val]).sort_values("user", kind="stable")
-    return Phase("test", history.reset_index(drop=True), split.test, dataset, positive_threshold)
+    return Phase(
+        "test",
+        history.reset_index(drop=True),
+        split.test,
+        dataset,
+        positive_threshold,
+        warm_only=split.mode == "global",
+    )
 
 
 test_phase.__test__ = False  # stop pytest collecting this function as a test
@@ -109,12 +138,13 @@ def evaluate_ranking(
     recommendations = {}
     for user in user_order(phase.users, rng):
         user = int(user)
-        items = rank_top_k(model.score(user), phase.seen_items(user), k)
+        items = rank_top_k(model.score(user), phase.excluded_items(user), k)
         model.record_impression(items)
         recommendations[user] = items
         metrics = ranking_metrics(
             items, phase.positives[user], k, phase.self_information, phase.item_genres
         )
         rows.append({"user": user, **metrics})
-    per_user = pd.DataFrame(rows).sort_values("user").reset_index(drop=True)
+    columns = ["user", "precision", "recall", "ndcg", "novelty", "diversity"]
+    per_user = pd.DataFrame(rows, columns=columns).sort_values("user").reset_index(drop=True)
     return RankingRun(per_user, recommendations)

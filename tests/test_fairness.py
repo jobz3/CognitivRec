@@ -41,6 +41,8 @@ def test_merit_gap_is_zero_when_exposure_follows_relevance():
     bands = np.array([0, 1, 2])
     report = band_report({0: np.array([0, 1, 2])}, {0: {0, 1, 2}}, bands)
     assert report["merit_gap"] == pytest.approx(0.0)
+    assert report["rank_merit_gap"] > 0
+    assert report["rank_exposure_share_head"] > report["rank_exposure_share_tail"]
     assert report["recall_tail"] == pytest.approx(1.0)
 
 

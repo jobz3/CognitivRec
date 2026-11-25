@@ -1,10 +1,4 @@
-"""Report figures. Owner: Abhinav.
-
-Colours are fixed per model and were checked with a colourblind-safety validator. Three of them
-have low contrast on the background, so each model also has its own marker shape, and every figure
-sits next to a CSV of the same numbers. Each plot has one y-axis: quantities on different scales
-get separate panels rather than a second axis.
-"""
+"""Shared styles and dual-format export for academic figures."""
 
 from __future__ import annotations
 
@@ -12,10 +6,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from matplotlib import rc_context
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-SURFACE = "#fcfcfb"
+SURFACE = "#ffffff"
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 INK_MUTED = "#898781"
@@ -24,22 +19,24 @@ AXIS = "#c3c2b7"
 
 # Colour follows the model, in this order, in every figure.
 MODEL_STYLES = {
-    "A: Popularity": ("#2a78d6", "o"),
-    "B1: ItemKNN": ("#eb6834", "s"),
-    "B2: SVD": ("#1baf7a", "^"),
-    "C: Cognitive": ("#eda100", "D"),
-    "D: Cognitive + UCB": ("#e87ba4", "v"),
+    "A: Popularity": ("#5b6573", "o"),
+    "B1: ItemKNN": ("#a24510", "s"),
+    "B2: SVD": ("#00785d", "^"),
+    "C: Cognitive": ("#1565a0", "D"),
+    "D: Cognitive + UCB": ("#9c3d77", "v"),
 }
-SERIES_COLOR = "#2a78d6"
+SERIES_COLOR = "#1565a0"
 
 LINE_WIDTH = 1.5  # points; 2px at 96 dpi
 MARKER_SIZE = 7
 RING_WIDTH = 1.5
 
 
-def _new_figure(width: float, height: float, columns: int = 1) -> tuple[Figure, np.ndarray]:
+def _new_figure(
+    width: float, height: float, columns: int = 1, rows: int = 1
+) -> tuple[Figure, np.ndarray]:
     figure = Figure(figsize=(width, height), dpi=200, facecolor=SURFACE, layout="constrained")
-    axes = np.atleast_1d(figure.subplots(1, columns))
+    axes = np.asarray(figure.subplots(rows, columns)).reshape(-1)
     for ax in axes:
         _style_axes(ax)
     return figure, axes
@@ -65,12 +62,15 @@ def _title(ax: Axes, text: str) -> None:
     ax.set_title(text, loc="left", color=INK, fontsize=11, fontweight="bold", pad=10)
 
 
-def _line(ax: Axes, x, y, color: str, marker: str, label: str | None = None) -> None:
+def _line(
+    ax: Axes, x, y, color: str, marker: str, label: str | None = None, *, linestyle: str = "-"
+) -> None:
     ax.plot(
         x,
         y,
         color=color,
         linewidth=LINE_WIDTH,
+        linestyle=linestyle,
         marker=marker,
         markersize=MARKER_SIZE,
         markeredgecolor=SURFACE,
@@ -97,8 +97,13 @@ def _note(
 
 
 def _save(figure: Figure, path: Path) -> Path:
-    figure.savefig(path, facecolor=SURFACE)
-    return path
+    """Export a portable vector copy and a 300-dpi PNG from one layout."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rc_context({"svg.fonttype": "path", "svg.hashsalt": "cognitiverec"}):
+        figure.savefig(path.with_suffix(".svg"), facecolor=SURFACE, metadata={"Date": None})
+    png = path.with_suffix(".png")
+    figure.savefig(png, dpi=300, facecolor=SURFACE)
+    return png
 
 
 def plot_shift_curves(curves: pd.DataFrame, path: Path) -> Path:
@@ -157,16 +162,35 @@ def plot_accuracy_coverage(
         ax, f"beta = {last.exploration_beta:g}", last.coverage_pct, last.ndcg, (-8, 10), ha="right"
     )
     selected = sweep[np.isclose(sweep["exploration_beta"], selected_beta)]
-    if len(selected) and selected_beta not in (first.exploration_beta, last.exploration_beta):
+    if len(selected):
         row = selected.iloc[0]
-        _note(ax, f"selected, beta = {selected_beta:g}", row.coverage_pct, row.ndcg, (8, 10))
+        ax.scatter(
+            row.coverage_pct,
+            row.ndcg,
+            s=1.6 * MARKER_SIZE**2,
+            marker="D",
+            color="#b16c19",
+            edgecolor=SURFACE,
+            linewidth=RING_WIDTH,
+            zorder=4,
+            label=f"Selected beta = {selected_beta:g}",
+        )
 
     _title(ax, "Accuracy against catalogue coverage (validation)")
     ax.set_xlabel("Catalogue coverage (%)")
     ax.set_ylabel("NDCG@10")
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
-    ax.legend(frameon=False, fontsize=8.5, labelcolor=INK_SECONDARY, loc="upper right")
+    handles, labels = ax.get_legend_handles_labels()
+    figure.legend(
+        handles,
+        labels,
+        frameon=False,
+        fontsize=8.5,
+        labelcolor=INK_SECONDARY,
+        loc="outside lower center",
+        ncols=3,
+    )
     return _save(figure, path)
 
 
@@ -191,12 +215,22 @@ def plot_adaptation_stability(
     selected = sweep[np.isclose(sweep["base_alpha"], selected_alpha)]
     if len(selected) and selected_alpha not in (first.base_alpha, last.base_alpha):
         row = selected.iloc[0]
+        ax.scatter(
+            row.stability,
+            100 * row.shift_adaptation,
+            s=1.6 * MARKER_SIZE**2,
+            marker="D",
+            color="#b16c19",
+            edgecolor=SURFACE,
+            linewidth=RING_WIDTH,
+            zorder=4,
+        )
         _note(
             ax,
             f"selected, alpha = {selected_alpha:g}",
             row.stability,
             100 * row.shift_adaptation,
-            (8, 10),
+            (8, 4),
         )
 
     ax.margins(x=0.08, y=0.14)  # room for the end labels inside the axes

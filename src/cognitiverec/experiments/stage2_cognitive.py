@@ -12,7 +12,13 @@ from cognitiverec.config import load_config, save_tuned
 from cognitiverec.data import Dataset, Split
 from cognitiverec.evaluation.protocol import Phase, evaluate_ranking, validation_phase
 from cognitiverec.evaluation.reliability import evaluate_replay
-from cognitiverec.experiments.common import StageOutput, load_context, ranking_summary, start_run
+from cognitiverec.experiments.common import (
+    StageOutput,
+    load_context,
+    ranking_summary,
+    record_cohorts,
+    start_run,
+)
 from cognitiverec.models import CognitiveRecommender
 
 
@@ -22,7 +28,7 @@ def _sample_trials(search: dict[str, Any]) -> list[dict[str, Any]]:
     grid = search["grid"]
     defaults = CognitiveRecommender()
     trials: list[dict[str, Any]] = [{name: getattr(defaults, name) for name in grid}]
-    seen: set[tuple] = set()
+    seen = {tuple(trials[0].values())}
     for _ in range(search["n_trials"] * 20):
         if len(trials) > search["n_trials"]:
             break
@@ -52,6 +58,8 @@ def _search_model_c(config: dict[str, Any], phase: Phase) -> tuple[dict[str, Any
         rows.append({**params, **metrics})
         if metrics[search["objective"]] > best_value:
             best_value, best_params = metrics[search["objective"]], params
+    if not best_params:
+        raise ValueError(f"No eligible validation users for {search['objective']}.")
     return best_params, pd.DataFrame(rows)
 
 
@@ -72,6 +80,7 @@ def _select_beta(
                 "ndcg": float(np.mean([run["ndcg"] for run in runs])),
                 "coverage_pct": float(np.mean([run["coverage_pct"] for run in runs])),
                 "gini": float(np.mean([run["gini"] for run in runs])),
+                "rank_merit_gap": float(np.mean([run["rank_merit_gap"] for run in runs])),
             }
         )
     table = pd.DataFrame(rows)
@@ -84,7 +93,7 @@ def _select_beta(
 def memory_report(model: CognitiveRecommender, phase: Phase) -> dict[str, float]:
     """Summarise whether short-term memory reaches the ranking, or sits unused."""
     rows = [
-        model.memory_diagnostics(int(user), phase.seen_items(int(user))) for user in phase.users
+        model.memory_diagnostics(int(user), phase.excluded_items(int(user))) for user in phase.users
     ]
     rows = [row for row in rows if row is not None]
     long_term = float(np.mean([row["long_term_spread"] for row in rows]))
@@ -120,6 +129,7 @@ def run(config: dict[str, Any] | None = None, dataset: Dataset | None = None) ->
     tables["beta"].to_csv(run_dir / "beta_sweep.csv", index=False)
 
     phase = validation_phase(context.dataset, context.split, context.positive_threshold)
+    record_cohorts(run_dir, phase)
     diagnostics = memory_report(phase.fit(CognitiveRecommender(**params["model_c"])), phase)
     with (run_dir / "memory_report.yaml").open("w", encoding="utf-8") as handle:
         yaml.safe_dump(diagnostics, handle)

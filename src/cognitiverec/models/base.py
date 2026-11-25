@@ -38,5 +38,8 @@ class Explainable(Protocol):
     def attributions(self, user: int, item: int) -> np.ndarray:
         """Return the weight the model gives each evidence entry when scoring `item`."""
 
+    def evidence_items(self, user: int) -> np.ndarray:
+        """Return the item ids in attribution and deletion order."""
+
     def score_without(self, user: int, entry: int) -> np.ndarray:
         """Return full-catalogue scores with evidence entry `entry` removed."""

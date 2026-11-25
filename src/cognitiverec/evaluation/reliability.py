@@ -30,7 +30,7 @@ def observed_drift_users(
     """Return users whose most-liked genre differs between history and targets.
 
     This is only a label for a difference between two samples. Most MovieLens users rate in a
-    single sitting, so it is not evidence of a real change in taste (see docs/methodology.md).
+    single sitting, so it is not evidence of a real change in taste (see PROJECT_REPORT.md).
     """
     threshold = phase.positive_threshold
     liked = phase.history[phase.history["rating"] >= threshold]
@@ -56,7 +56,8 @@ def evaluate_replay(
     """Feed each user's first target interactions to the model, then predict the later positives.
 
     All models get the same replay and are scored on the same target set. Returns one row per user
-    with at least one later positive.
+    with at least one later positive and a timestamp boundary before it. A frozen ranking uses
+    the same candidates and exposure state to isolate the effect of incorporating feedback.
     """
     model = copy.deepcopy(model)
     drift = observed_drift_users(phase)
@@ -64,39 +65,52 @@ def evaluate_replay(
     for user in user_order(phase.users, rng):
         user = int(user)
         stream = phase.streams[user]
-        split_at = len(stream) // 2 + 1
+        timestamps = stream["timestamp"].to_numpy()
+        boundaries = np.flatnonzero(timestamps[1:] != timestamps[:-1]) + 1
+        if not len(boundaries):
+            continue
+        split_at = int(boundaries[np.argmin(abs(boundaries - (len(stream) + 1) // 2))])
         replayed, later = stream.iloc[:split_at], stream.iloc[split_at:]
         targets = set(later.loc[later["rating"] >= phase.positive_threshold, "item"].tolist())
         if not targets:
             continue
+        exclude = np.concatenate([phase.excluded_items(user), replayed["item"].to_numpy()])
+        before = rank_top_k(model.score(user), exclude, k)
         for row in replayed.itertuples(index=False):
             model.observe(user, int(row.item), float(row.rating), float(row.timestamp))
-        exclude = np.concatenate([phase.seen_items(user), replayed["item"].to_numpy()])
         items = rank_top_k(model.score(user), exclude, k)
         model.record_impression(items)
         rows.append(
             {
                 "user": user,
                 "ndcg": ndcg_at_k(items, targets, k),
+                "frozen_ndcg": ndcg_at_k(before, targets, k),
+                "n_feedback": len(replayed),
                 "n_targets": len(targets),
                 "observed_drift": user in drift,
             }
         )
-    columns = ["user", "ndcg", "n_targets", "observed_drift"]
+    columns = ["user", "ndcg", "frozen_ndcg", "n_feedback", "n_targets", "observed_drift"]
     return pd.DataFrame(rows, columns=columns).sort_values("user").reset_index(drop=True)
 
 
 def _draw_noise(phase: Phase, user: int, n_noise: int, rng: np.random.Generator) -> np.ndarray:
     """Pick random items this user has never interacted with, in history or in targets."""
     excluded = np.zeros(phase.n_items, dtype=bool)
-    excluded[phase.seen_items(user)] = True
+    excluded[phase.excluded_items(user)] = True
     excluded[phase.streams[user]["item"].to_numpy()] = True
     pool = np.flatnonzero(~excluded)
     return rng.choice(pool, size=min(n_noise, len(pool)), replace=False)
 
 
 def _noise_pass(
-    model: Recommender, phase: Phase, order: np.ndarray, noise: dict[int, np.ndarray], k: int
+    model: Recommender,
+    phase: Phase,
+    order: np.ndarray,
+    noise: dict[int, np.ndarray],
+    k: int,
+    *,
+    observe: bool = True,
 ) -> float:
     """Run one recommendation pass, injecting each user's noise first. Returns mean NDCG."""
     model = copy.deepcopy(model)
@@ -105,9 +119,10 @@ def _noise_pass(
     for user in order:
         user = int(user)
         injected = noise.get(user, np.empty(0, dtype=np.int64))
-        for item in injected:
-            model.observe(user, int(item), INJECTED_RATING, timestamp)
-        exclude = np.concatenate([phase.seen_items(user), injected])
+        if observe:
+            for item in injected:
+                model.observe(user, int(item), INJECTED_RATING, timestamp)
+        exclude = np.concatenate([phase.excluded_items(user), injected])
         items = rank_top_k(model.score(user), exclude, k)
         model.record_impression(items)
         scores.append(ndcg_at_k(items, phase.positives[user], k))
@@ -119,13 +134,14 @@ def evaluate_noise(
 ) -> float:
     """Return noisy NDCG as a percentage of clean NDCG.
 
-    The two passes differ only in the noise: same model state, user order and exposure updates.
+    Both passes exclude the injected items and start from the same state and user order.
+    Exploration can subsequently diverge if the noise changes impressions.
     With `n_noise=0` the result is exactly 100, and noise draws do not depend on the model, so a
     seed gives every model the same noise.
     """
     order = user_order(phase.users, rng)
     noise = {int(user): _draw_noise(phase, int(user), n_noise, rng) for user in order}
-    clean = _noise_pass(model, phase, order, {}, k)
+    clean = _noise_pass(model, phase, order, noise, k, observe=False)
     noisy = _noise_pass(model, phase, order, noise, k)
     return 100.0 * (noisy / clean) if clean > 0 else float("nan")
 
@@ -135,7 +151,7 @@ def _shift_plan(
 ) -> tuple[int, np.ndarray] | None:
     """Pick a genre this user rarely touches, and the items to inject from it, in order."""
     excluded = np.zeros(phase.n_items, dtype=bool)
-    excluded[phase.seen_items(user)] = True
+    excluded[phase.excluded_items(user)] = True
     excluded[phase.streams[user]["item"].to_numpy()] = True
     available = (phase.popularity >= min_popularity) & ~excluded
 
@@ -166,6 +182,7 @@ def evaluate_simulated_shift(
 
     Returns one row per step (including step 0):
     - `adaptation`: share of the top-k list in the new genre. How quickly did it adapt?
+    - `feedback_gain`: genre share minus a frozen score with the same exclusions.
     - `retention_pct`: NDCG on the user's original positives, as a percentage of step 0. Did it
       keep the user's existing interests?
     """
@@ -182,25 +199,35 @@ def evaluate_simulated_shift(
             continue
         genre, injected = plan
         in_genre = phase.item_genres[:, genre].astype(bool)
+        frozen_scores = model.score(user)
+        initial_list = rank_top_k(frozen_scores, phase.excluded_items(user), k)
         for step in range(last_step + 1):
             if step > 0:
                 model.observe(user, int(injected[step - 1]), INJECTED_RATING, timestamp)
             if step == 0 or step in checkpoints:
-                exclude = np.concatenate([phase.seen_items(user), injected[:step]])
-                items = rank_top_k(model.score(user), exclude, k)
-                model.record_impression(items)
+                exclude = np.concatenate([phase.excluded_items(user), injected[:step]])
+                frozen = rank_top_k(frozen_scores, exclude, k)
+                items = rank_top_k(model.score(user), exclude, k) if step else initial_list
                 rows.append(
                     {
                         "user": user,
                         "step": step,
                         "adaptation": float(in_genre[items].mean()),
+                        "feedback_gain": float(in_genre[items].mean() - in_genre[frozen].mean()),
                         "ndcg": ndcg_at_k(items, phase.positives[user], k),
                     }
                 )
-    frame = pd.DataFrame(rows, columns=["user", "step", "adaptation", "ndcg"])
+        # Share one initial impression per user and freeze exploration during each intervention.
+        model.record_impression(initial_list)
+    frame = pd.DataFrame(rows, columns=["user", "step", "adaptation", "feedback_gain", "ndcg"])
     curve = (
         frame.groupby("step")
-        .agg(adaptation=("adaptation", "mean"), ndcg=("ndcg", "mean"), users=("user", "nunique"))
+        .agg(
+            adaptation=("adaptation", "mean"),
+            feedback_gain=("feedback_gain", "mean"),
+            ndcg=("ndcg", "mean"),
+            users=("user", "nunique"),
+        )
         .reset_index()
     )
     start = curve["ndcg"].iloc[0] if len(curve) else 0.0
@@ -225,7 +252,7 @@ def evaluate_stability(
     overlaps = []
     for user in user_order(phase.users, rng):
         user = int(user)
-        exclude = phase.seen_items(user)
+        exclude = phase.excluded_items(user)
         previous = rank_top_k(model.score(user), exclude, k)
         model.record_impression(previous)
         for row in phase.streams[user].iloc[:max_steps].itertuples(index=False):

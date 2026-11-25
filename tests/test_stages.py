@@ -135,7 +135,8 @@ def test_stage2_beta_stays_within_the_ndcg_budget(overrides, dataset):
 
 def test_stage3_measures_every_model_on_every_question(overrides, dataset):
     run_tuning_stages(overrides, dataset)
-    output = stage3_trust.run(stage_config("stage3_trust", overrides), dataset)
+    config = stage_config("stage3_trust", overrides)
+    output = stage3_trust.run(config, dataset)
     metrics = output.tables["metrics"].set_index("model")
     assert len(metrics) == 5
     assert (output.run_dir / "shift_curves.png").exists()
@@ -146,13 +147,23 @@ def test_stage3_measures_every_model_on_every_question(overrides, dataset):
     measured = ["ndcg", "coverage_pct", "replay_ndcg", "stability", "noise_retention_2_pct"]
     assert metrics[measured].notna().all().all()
     assert metrics["cold_ndcg_5"].notna().all()
+    examples = output.tables["fidelity_examples"].query("model == 'D: Cognitive + UCB'")
+    assert len(examples) == 3
+    assert examples[["long_term", "short_term", "exploration"]].sum(
+        axis=1
+    ).tolist() == pytest.approx(examples["base_score"].tolist())
+
+    sensitivity = stage3_trust.run_sensitivity(config, dataset).tables["metrics"].set_index("model")
+    shared = ["ndcg", "coverage_pct", "rank_merit_gap", "replay_ndcg", "replay_gain"]
+    pd.testing.assert_frame_equal(metrics[shared], sensitivity[shared])
 
 
 def test_stage3_compares_models_on_paired_users(overrides, dataset):
     run_tuning_stages(overrides, dataset)
     output = stage3_trust.run(stage_config("stage3_trust", overrides), dataset)
     comparisons = output.tables["comparisons"]
-    assert set(comparisons["metric"]) == {"ndcg", "replay_ndcg"}
+    assert set(comparisons["metric"]) == {"ndcg", "replay_ndcg", "replay_gain"}
+    assert (comparisons["paired_users"] > 0).all()
     assert "D: Cognitive + UCB" in comparisons["model"].tolist()
     assert "C: Cognitive" in comparisons["compared_with"].tolist()
     assert (comparisons["ci_low"] <= comparisons["ci_high"]).all()
@@ -195,3 +206,5 @@ def test_stage4_runs_ablations_and_draws_trade_offs(overrides, dataset):
     assert set(output.tables["comparisons"]["compared_with"]) == {"Full Model D"}
     assert len(output.figures) == 2
     assert all(path.exists() for path in output.figures)
+    tuned = load_tuned(stage_config("stage4_ablation", overrides), "cognitive")["model_d"]
+    assert tuned["base_alpha"] in output.tables["alpha_sweep"]["base_alpha"].tolist()

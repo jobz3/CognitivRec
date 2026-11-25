@@ -24,6 +24,13 @@ def test_notebook_has_no_committed_outputs():
 
 def test_notebook_runs_every_stage_and_defines_no_models():
     source = "\n".join(cell.source for cell in load_notebook().cells if cell.cell_type == "code")
-    for stage in ("stage1_baselines", "stage2_cognitive", "stage3_trust", "stage4_ablation"):
+    for stage in (
+        "stage1_baselines",
+        "stage2_cognitive",
+        "stage3_trust",
+        "stage4_ablation",
+        "temporal_followup",
+        "exploration_study",
+    ):
         assert f"{stage}.run(" in source
     assert "class " not in source

@@ -7,6 +7,7 @@ paths:
   tuned: configs/tuned
 
 split:
+  mode: global
   train: 0.70
   val: 0.15 # the remaining 0.15 is test
 

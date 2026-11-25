@@ -1,7 +1,7 @@
 """RQ2 fairness metrics. Owner: Jobin.
 
 Exposure equality on its own is not fairness, because items differ in relevance. So exposure
-inequality (coverage, Gini) is reported next to relevance-aware measures. docs/methodology.md
+inequality (coverage, Gini) is reported next to relevance-aware measures. PROJECT_REPORT.md
 states the definitions used.
 """
 
@@ -63,47 +63,65 @@ def band_report(
     recommended, which should not depend on popularity under equal opportunity.
     """
     exposed = np.zeros(3)
+    rank_exposed = np.zeros(3)
     relevant = np.zeros(3)
     hit = np.zeros(3)
     for user, items in recommendations.items():
         np.add.at(exposed, bands[items], 1.0)
+        np.add.at(rank_exposed, bands[items], 1.0 / np.log2(np.arange(len(items)) + 2))
         targets = positives[user]
         np.add.at(relevant, bands[np.fromiter(targets, dtype=np.int64)], 1.0)
         recommended = [int(item) for item in items if int(item) in targets]
         np.add.at(hit, bands[np.array(recommended, dtype=np.int64)], 1.0)
 
     exposure_share = exposed / max(exposed.sum(), 1.0)
+    rank_exposure_share = rank_exposed / max(rank_exposed.sum(), 1.0)
     relevance_share = relevant / max(relevant.sum(), 1.0)
     report: dict[str, float] = {
-        "merit_gap": float(0.5 * np.abs(exposure_share - relevance_share).sum())
+        "merit_gap": float(0.5 * np.abs(exposure_share - relevance_share).sum()),
+        "rank_merit_gap": float(0.5 * np.abs(rank_exposure_share - relevance_share).sum()),
     }
     for index, band in enumerate(BAND_NAMES):
         report[f"exposure_share_{band}"] = float(exposure_share[index])
+        report[f"rank_exposure_share_{band}"] = float(rank_exposure_share[index])
         report[f"relevance_share_{band}"] = float(relevance_share[index])
+        report[f"relevant_{band}"] = int(relevant[index])
         report[f"recall_{band}"] = (
             float(hit[index] / relevant[index]) if relevant[index] else np.nan
         )
     return report
 
 
-def activity_gap(run: RankingRun, phase: Phase) -> float:
-    """Return the absolute NDCG gap between high-activity and low-activity users.
+def activity_report(run: RankingRun, phase: Phase) -> dict[str, float]:
+    """Report group sizes, NDCG and its absolute gap for the two activity groups.
 
     Groups split at the median history size. The dataset's demographic fields are not used, so no
     demographic fairness claim follows from this.
     """
     sizes = run.per_user["user"].map(lambda user: len(phase.seen_items(int(user))))
     low = sizes <= sizes.median()
-    return float(abs(run.per_user.loc[~low, "ndcg"].mean() - run.per_user.loc[low, "ndcg"].mean()))
+    low_mean = float(run.per_user.loc[low, "ndcg"].mean())
+    high_mean = float(run.per_user.loc[~low, "ndcg"].mean())
+    return {
+        "activity_gap": abs(high_mean - low_mean),
+        "low_activity_ndcg": low_mean,
+        "high_activity_ndcg": high_mean,
+        "low_activity_users": int(low.sum()),
+        "high_activity_users": int((~low).sum()),
+    }
+
+
+def activity_gap(run: RankingRun, phase: Phase) -> float:
+    return activity_report(run, phase)["activity_gap"]
 
 
 def fairness_report(run: RankingRun, phase: Phase) -> dict[str, float]:
     """All RQ2 metrics for one ranking run."""
     exposure = exposure_counts(run.recommendations, phase.n_items)
     report = {
-        "coverage_pct": catalogue_coverage(exposure),
-        "gini": gini(exposure),
-        "activity_gap": activity_gap(run, phase),
+        "coverage_pct": catalogue_coverage(exposure[phase.catalogue]),
+        "gini": gini(exposure[phase.catalogue]),
+        **activity_report(run, phase),
     }
     report.update(
         band_report(run.recommendations, phase.positives, popularity_bands(phase.popularity))

@@ -1,0 +1,5 @@
+# Select by validation coverage subject to a 10% relative NDCG@10 loss per scorer.
+exploration_study:
+  max_ndcg_loss: 0.10
+  # Each multiplier is expressed in units of that scorer's median candidate-score SD.
+  multipliers: [0, 0.05, 0.10, 0.20, 0.35, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0]

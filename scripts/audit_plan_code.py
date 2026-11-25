@@ -1,9 +1,7 @@
-"""Run the project plan's Colab code as written, and measure what is wrong with its results.
+"""Reproduce the original Colab plan for historical comparison with PROJECT_REPORT.md.
 
-Every number in docs/changes-from-plan.md under "as written" comes from this script, so anyone can
-check them with `make audit`. The classes below are the plan's Cells 1 to 4 with only the variable
-names shortened. Nothing in the project imports this file: it exists as evidence, and can be
-deleted once the team has reviewed the changes.
+Run `make audit` to inspect the original split, masking and metric behaviour. The main experiments
+use the package under `src/cognitiverec`.
 """
 
 from __future__ import annotations

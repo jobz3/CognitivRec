@@ -50,6 +50,7 @@ coverage.xml
 *.lcov
 .hypothesis/
 .pytest_cache/
+pytest-cache-files-*/
 cover/
 
 # Translations
@@ -219,9 +220,13 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# CognitiveRec: downloaded datasets and experiment outputs (anchored so that
-# src/cognitiverec/data/ stays tracked)
+# Local datasets, experiment outputs and machine-specific cache.
 /data/
 /results/
+/.uv-cache/
 
+# Keep the project documentation alongside the source and runnable notebook.
 *.md
+!/README.md
+!/PROJECT_REPORT.md
+!/story.md

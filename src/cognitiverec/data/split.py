@@ -1,4 +1,4 @@
-"""Per-user chronological split and a report of what it does not protect against. Owner: Mudit."""
+"""Chronological splits and temporal diagnostics. Owner: Mudit."""
 
 from __future__ import annotations
 
@@ -12,26 +12,52 @@ SESSION_GAP_SECONDS = 1800
 
 @dataclass(frozen=True)
 class Split:
-    """Interaction frames, each ordered by user and then by time."""
+    """Interaction frames and the protocol used to partition them."""
 
     train: pd.DataFrame
     val: pd.DataFrame
     test: pd.DataFrame
+    mode: str = "per_user"
 
 
 def chronological_split(
-    interactions: pd.DataFrame, train: float = 0.70, val: float = 0.15
+    interactions: pd.DataFrame,
+    train: float = 0.70,
+    val: float = 0.15,
+    mode: str = "per_user",
+    test_end: float = 1.0,
 ) -> Split:
-    """Give each user the first `train` of their ratings, then `val`, then the rest.
+    """Split by rating timestamps, with a global cutoff or a legacy per-user split.
 
-    This stops a user's own future reaching their training data, but other users' later ratings
-    can still appear in training. `temporal_report` measures that, and docs/methodology.md
-    explains why this split is still used.
-
-    Ratings that share a timestamp stay in dataset order, because the sort is stable.
+    Global cutoffs move to the start of a timestamp group, so no timestamp crosses a boundary.
+    The legacy protocol takes the requested proportions independently for each user.
     """
+    val_end = round(train + val, 10)
+    if train <= 0 or val <= 0 or val_end > 1:
+        raise ValueError("Invalid train and validation fractions.")
+    if mode == "global":
+        if not val_end < test_end <= 1:
+            raise ValueError("A global split requires a nonempty test window.")
+        ordered = interactions.sort_values("timestamp", kind="stable").reset_index(drop=True)
+        times = ordered["timestamp"].to_numpy()
+        if not len(times):
+            raise ValueError("A global split requires timestamped interactions.")
+        cutoffs = times[[int(train * len(times)), int(val_end * len(times))]]
+        first, second = np.searchsorted(times, cutoffs)
+        end = len(times) if test_end == 1 else np.searchsorted(times, times[int(test_end * len(times))])
+        if not 0 < first < second < end:
+            raise ValueError("Global cutoffs require three nonempty, distinct timestamp windows.")
+        return Split(
+            ordered.iloc[:first].reset_index(drop=True),
+            ordered.iloc[first:second].reset_index(drop=True),
+            ordered.iloc[second:end].reset_index(drop=True),
+            mode=mode,
+        )
+    if mode != "per_user":
+        raise ValueError(f"Unknown temporal split mode: {mode}")
+    if test_end != 1:
+        raise ValueError("A capped test window requires the global split.")
     ordered = interactions.sort_values(["user", "timestamp"], kind="stable").reset_index(drop=True)
-    val_end = round(train + val, 10)  # 0.70 + 0.15 is not exactly 0.85 in floating point
     train_parts, val_parts, test_parts = [], [], []
     for _, group in ordered.groupby("user", sort=False):
         n = len(group)

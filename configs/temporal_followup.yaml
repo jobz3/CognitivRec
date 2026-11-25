@@ -1,0 +1,29 @@
+# Train, validation and test end points as fractions of the global rating timeline.
+# The test windows are disjoint. Equal rating volumes give different calendar durations.
+windows:
+  - {name: early, train: 0.40, val: 0.15, test_end: 0.70}
+  - {name: middle, train: 0.55, val: 0.15, test_end: 0.85}
+  - {name: late, train: 0.70, val: 0.15, test_end: 1.00}
+
+# One fixed search budget per window, chosen before evaluating the follow-up tests.
+baselines:
+  Popularity: {}
+  ItemKNN:
+    top_k: [20, 50, 150, 300]
+    shrinkage: [0.0, 15.0, 50.0]
+    binary: [false, true]
+    tfidf: [false, true]
+  SVD:
+    n_factors: [2, 4, 8, 16, 32, 64, 128]
+  EASE:
+    regularization: [1.0, 10.0, 50.0, 100.0, 300.0, 1000.0]
+
+search:
+  n_trials: 24
+recency_half_lives: [3, 8, 20, 50]
+comparison_reference: "B1: ItemKNN"
+comparison_pairs:
+  - ["C: Cognitive", "B3: EASE"]
+  - ["C: Cognitive", "B5: Recency profile"]
+  - ["B5: Recency profile", "B4: All-history profile"]
+  - ["D: Cognitive + UCB", "C: Cognitive"]

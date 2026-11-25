@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from cognitiverec.models import SVD, CognitiveRecommender
-from cognitiverec.models.cognitive import _unit_rows
 from cognitiverec.models.exploration import ExposureTracker, ucb_bonus
+from cognitiverec.models.latent import unit_rows
 
 EMBEDDINGS = np.array([[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]])
 
@@ -162,7 +162,7 @@ def test_normalize_embeddings_flag_changes_candidate_vectors_only(dataset, split
 
 
 def test_items_with_no_history_get_a_zero_embedding():
-    unit = _unit_rows(np.array([[1.0, 2.0], [0.0, 0.0], [1e-14, 0.0]]))
+    unit = unit_rows(np.array([[1.0, 2.0], [0.0, 0.0], [1e-14, 0.0]]))
     np.testing.assert_array_equal(unit[1], [0.0, 0.0])
     np.testing.assert_array_equal(unit[2], [0.0, 0.0])
 

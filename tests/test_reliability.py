@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from cognitiverec.data import Dataset, chronological_split
-from cognitiverec.evaluation.protocol import rank_top_k, validation_phase
+from cognitiverec.evaluation.protocol import Phase, rank_top_k, validation_phase
 from cognitiverec.evaluation.reliability import (
     evaluate_cold_start,
     evaluate_noise,
@@ -85,7 +85,7 @@ def test_replay_never_recommends_what_was_just_replayed(val_phase):
     model = val_phase.fit(Capturing())
     evaluate_replay(model, val_phase, 5)
     user = int(evaluate_replay(model, val_phase, 5)["user"].iloc[0])
-    replayed = val_phase.streams[user].iloc[: len(val_phase.streams[user]) // 2 + 1]["item"]
+    replayed = val_phase.streams[user].iloc[: (len(val_phase.streams[user]) + 1) // 2]["item"]
     exclude = np.concatenate([val_phase.seen_items(user), replayed.to_numpy()])
     items = rank_top_k(model.score(user), exclude, 5)
     assert not set(items.tolist()) & set(replayed.tolist())
@@ -97,6 +97,19 @@ def test_replay_feedback_changes_an_adaptive_model_but_not_the_callers_copy(val_
     before = model.score(0).copy()
     evaluate_replay(model, val_phase, 5)
     np.testing.assert_array_equal(before, model.score(0))
+
+
+def test_replay_keeps_timestamp_ties_together_and_matches_frozen_popularity(val_phase, dataset):
+    phase = Phase(
+        "tied",
+        val_phase.history,
+        val_phase.targets.assign(timestamp=2_000, rating=5.0),
+        dataset,
+    )
+    assert evaluate_replay(phase.fit(Popularity()), phase, 5).empty
+    replay = evaluate_replay(val_phase.fit(Popularity()), val_phase, 5)
+    assert len(replay) > 0
+    np.testing.assert_array_equal(replay["ndcg"], replay["frozen_ndcg"])
 
 
 def drift_dataset() -> Dataset:
@@ -155,6 +168,19 @@ def test_shift_gives_every_model_the_same_injected_items(val_phase):
         )
     assert Logged.log["LoggedPopularity"]
     assert Logged.log["LoggedPopularity"] == Logged.log["LoggedKNN"]
+
+
+def test_shift_feedback_gain_is_zero_for_frozen_popularity(val_phase):
+    curve = evaluate_simulated_shift(
+        val_phase.fit(Popularity()),
+        val_phase,
+        steps=(1, 3),
+        k=5,
+        rng=rng(),
+        min_item_popularity=1,
+    )
+    assert len(curve) == 3
+    assert curve["feedback_gain"].eq(0).all()
 
 
 def test_shift_skips_users_when_no_genre_has_enough_items(val_phase):
